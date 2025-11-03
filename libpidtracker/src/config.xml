@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pid_control_config>
+    <!-- 系统参数常量 -->
+    <system_parameters>
+        <!-- ai帧率 -->
+        <ai_frame_rate_hz>10</ai_frame_rate_hz>
+        <!-- 电机速度等级值（64个） -->
+        <speed_levels max_speed_level="16" s0="1" s1="2" s2="3" s3="4" s4="5" s5="6" s6="7" s7="8" s8="9" s9="10" s10="11" s11="12" s12="13" s13="14" s14="15" s15="16"/>
+        <!-- 电机最大角速度（度/秒） -->
+        <motor_vmax_deg_per_sec>60.0</motor_vmax_deg_per_sec>
+        
+        <!-- 图像和视场参数 -->
+        <!-- ai码流宽度 -->
+        <frame_width_pixels>640.0</frame_width_pixels>
+        <!-- ai码流高度 -->
+        <frame_height_pixels>480.0</frame_height_pixels>
+        <!-- 水平视场角 -->
+        <horizontal_fov_deg>60.0</horizontal_fov_deg>
+        <!-- 垂直视场角 -->
+        <vertical_fov_deg>45.0</vertical_fov_deg>
+    </system_parameters>
+    
+    <!-- PID 附加参数 -->
+    <pid_parameters>
+        <!-- 死区大小 -->
+        <deadband_deg>0.02</deadband_deg>
+        <!-- D滤波系数 -->
+        <d_filter_alpha>0.2</d_filter_alpha>
+        <!-- 积分系数(暂时不需要) -->
+        <integral_ratio>0.0</integral_ratio>
+        <!-- 积分限幅(暂时不需要) -->
+        <guard_epsilon>0</guard_epsilon>
+        
+        <!-- 水平轴PID参数 -->
+        <horizontal>
+            <kp>0.8</kp>
+            <ki>0.15</ki>
+            <kd>0.05</kd>
+        </horizontal>
+        
+        <!-- 垂直轴PID参数 -->
+        <vertical>
+            <kp>0.8</kp>
+            <ki>0.15</ki>
+            <kd>0.05</kd>
+        </vertical>
+    </pid_parameters>
+    
+    <!-- 预测器参数 -->
+    <prediction_parameters>
+        <!-- 速度滤波系数 -->
+        <velocity_alpha>0.5</velocity_alpha>
+        <!-- 最大位移因子 -->
+        <max_shift_factor>0.3</max_shift_factor>
+        <!-- 保护区比例 -->
+        <guard_ratio>0.5</guard_ratio>
+        <!-- 保护区最小值 -->
+        <guard_ratio_min>0.3</guard_ratio_min>
+        <!-- 保护区最大值 -->
+        <guard_ratio_max>0.6</guard_ratio_max>
+        <!-- 保护区自适应窗口大小（帧数） -->
+        <guard_adapt_window>30</guard_adapt_window>
+        <!-- 目标中心容忍度（度） -->
+        <center_tolerance_deg>0.3</center_tolerance_deg>
+    </prediction_parameters>
+    
+    <!-- 功能开关 -->
+    <feature_switches>
+        <!-- 使能预测 -->
+        <enable_prediction>1</enable_prediction>
+        <!-- 使能D滤波 -->
+        <enable_d_filter>1</enable_d_filter>
+        <!-- 使能预测保护 -->
+        <enable_prediction_guard>1</enable_prediction_guard>
+        <!-- 使能预测保护自适应 -->
+        <enable_prediction_adaptive_guard>1</enable_prediction_adaptive_guard>
+    </feature_switches>
+    
+</pid_control_config>

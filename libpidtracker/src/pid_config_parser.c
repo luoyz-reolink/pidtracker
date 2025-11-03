@@ -1,0 +1,1 @@
+// Legacy C implementation removed. Use pid_config_parser.cpp for the current C++ version.
