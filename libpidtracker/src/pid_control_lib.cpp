@@ -1,7 +1,7 @@
 /*** 
  * @Author: lkyezi
  * @Date: 2025-10-30 18:20:20
- * @LastEditTime: 2025-10-31 15:25:56
+ * @LastEditTime: 2025-11-06 11:41:39
  * @LastEditors: lkyezi
  * @Description: 
  * @
@@ -59,11 +59,12 @@ struct TargetPredictionState {
 
 struct PIDControlLib {
     PIDControlConfig config{};
-    PIDController pid_controllers[AXIS_BUTT]{};
-    MotorControl motor_controllers[AXIS_BUTT]{};
-    TargetPredictionState prediction_states[AXIS_BUTT]{};
+    PIDController pid_controllers[AXIS_TOTAL]{};
+    MotorControl motor_controllers[AXIS_TOTAL]{};
+    TargetPredictionState prediction_states[AXIS_TOTAL]{};
     HardwareInterface hw_interface{};
     PIDControlStats stats{};
+    uint64_t last_control_pts = 0U;
     bool initialized = false;
     bool running = false;
 };
@@ -144,18 +145,14 @@ inline void MotorControlInit(MotorControl& motor, AxisType_E axis) {
 inline void MotorControlDesiredSpeedToLevel(MotorControl& motor,
                                             const SystemParameters& sys,
                                             float desired_speed) {
-    uint8_t direction = (desired_speed > 0.0f) ? 1U : 0U;
+    uint8_t direction = (desired_speed > 0.0f) ? 0U : 1U;
     uint8_t level = 0U;
     const float abs_speed = AbsF(desired_speed);
 
-    if(abs_speed)
+    for (; level < sys.max_speed_level; ++level) 
     {
-        for (; level < sys.max_speed_level; ++level) 
-        {
-            if (abs_speed < sys.speed_levels[level]) {
-                level = static_cast<uint8_t>(level + 1U);
-                break;
-            }
+        if (abs_speed < sys.speed_levels[level]) {
+            break;
         }
     }
 
@@ -291,6 +288,16 @@ float ComputePid(PIDController& pid,
 
     pid.prev_error = error;
     pid.output = ClampF(output, pid.min_output, pid.max_output);
+
+    printf("PID Compute: Error=%.3f, prev_Error=%.3f, dt=%.3f, P=%.3f, I=%.3f, D=%.3f, Output=%.3f\n",
+           error,
+           pid.prev_error,
+           safe_dt,
+           proportional_term,
+           integral_term,
+           derivative_term,
+           pid.output);
+
     return pid.output;
 }
 
@@ -332,7 +339,7 @@ bool pid_control_init_from_xml(PIDControlLib* lib,
                                          : 0U;
     const float max_output = lib->config.system.speed_levels[max_level_index];
 
-    for (int axis = 0; axis < AXIS_BUTT; ++axis) {
+    for (int axis = 0; axis < AXIS_TOTAL; ++axis) {
         MotorControlInit(lib->motor_controllers[axis], static_cast<AxisType_E>(axis));
         lib->motor_controllers[axis].set_speed = hw_interface->motor_set_speed;
         lib->motor_controllers[axis].disable_motor = hw_interface->motor_disable;
@@ -373,7 +380,7 @@ bool pid_control_init_default(PIDControlLib* lib, const HardwareInterface* hw_in
                                          : 0U;
     const float max_output = lib->config.system.speed_levels[max_level_index];
 
-    for (int axis = 0; axis < AXIS_BUTT; ++axis) {
+    for (int axis = 0; axis < AXIS_TOTAL; ++axis) {
         MotorControlInit(lib->motor_controllers[axis], static_cast<AxisType_E>(axis));
         lib->motor_controllers[axis].set_speed = hw_interface->motor_set_speed;
         lib->motor_controllers[axis].disable_motor = hw_interface->motor_disable;
@@ -461,7 +468,8 @@ void pid_control_step(PIDControlLib* lib) {
 
     float target_px_x = 0.0f;
     float target_px_y = 0.0f;
-    if (!lib->hw_interface.get_target_pixel_position(&target_px_x, &target_px_y)) {
+    uint64_t pts = 0U;
+    if (!lib->hw_interface.get_target_pixel_position(&target_px_x, &target_px_y, &pts)) {
         lib->motor_controllers[AXIS_HORIZONTAL].enabled = 0U;
         lib->motor_controllers[AXIS_VERTICAL].enabled = 0U;
         MotorControlDisable(lib->motor_controllers[AXIS_HORIZONTAL]);
@@ -474,7 +482,10 @@ void pid_control_step(PIDControlLib* lib) {
 
     lib->stats.control_cycles++;
 
-    const float frame_period = 1.0f / static_cast<float>(lib->config.system.ai_frame_rate_hz);
+    const float frame_period = pts - lib->last_control_pts > 0U
+                                   ? static_cast<float>(pts - lib->last_control_pts) / 1e6f
+                                   : 0.0f;
+    lib->last_control_pts = pts;
     const float max_horizontal_range = lib->config.system.horizontal_fov_deg * 0.5f;
     const float max_vertical_range = lib->config.system.vertical_fov_deg * 0.5f;
 
@@ -513,21 +524,21 @@ void pid_control_step(PIDControlLib* lib) {
     MotorControlDesiredSpeedToLevel(lib->motor_controllers[AXIS_HORIZONTAL], lib->config.system, horizontal_command);
     MotorControlDesiredSpeedToLevel(lib->motor_controllers[AXIS_VERTICAL], lib->config.system, vertical_command);
 
-    printf("Horizontal Target: %.2f deg, Predicted: %.2f deg, Actual: %.2f deg, Command: %.2f deg/s, Level: %u, Direction: %u\n",
-           target_horizontal_deg,
-           predicted_horizontal_deg,
-           actual_horizontal_deg,
-           horizontal_command,
-           lib->motor_controllers[AXIS_HORIZONTAL].level,
-           lib->motor_controllers[AXIS_HORIZONTAL].direction);
+    // printf("Horizontal Target: %.2f deg, Predicted: %.2f deg, Actual: %.2f deg, Command: %.2f deg/s, Level: %u, Direction: %u\n",
+    //        target_horizontal_deg,
+    //        predicted_horizontal_deg,
+    //        actual_horizontal_deg,
+    //        horizontal_command,
+    //        lib->motor_controllers[AXIS_HORIZONTAL].level,
+    //        lib->motor_controllers[AXIS_HORIZONTAL].direction);
 
-    printf("Vertical   Target: %.2f deg, Predicted: %.2f deg, Actual: %.2f deg, Command: %.2f deg/s, Level: %u, Direction: %u\n",
-           target_vertical_deg,
-           predicted_vertical_deg,
-           actual_vertical_deg,
-           vertical_command,
-           lib->motor_controllers[AXIS_VERTICAL].level,
-           lib->motor_controllers[AXIS_VERTICAL].direction);
+    // printf("Vertical   Target: %.2f deg, Predicted: %.2f deg, Actual: %.2f deg, Command: %.2f deg/s, Level: %u, Direction: %u\n",
+    //        target_vertical_deg,
+    //        predicted_vertical_deg,
+    //        actual_vertical_deg,
+    //        vertical_command,
+    //        lib->motor_controllers[AXIS_VERTICAL].level,
+    //        lib->motor_controllers[AXIS_VERTICAL].direction);
 
     MotorControlSetSpeed(lib->motor_controllers[AXIS_HORIZONTAL]);
     MotorControlSetSpeed(lib->motor_controllers[AXIS_VERTICAL]);
@@ -562,7 +573,7 @@ void pid_control_reset(PIDControlLib* lib) {
         return;
     }
 
-    for (int axis = 0; axis < AXIS_BUTT; ++axis) {
+    for (int axis = 0; axis < AXIS_TOTAL; ++axis) {
         PIDController& pid = lib->pid_controllers[axis];
         pid.integral = 0.0f;
         pid.prev_error = 0.0f;
@@ -577,7 +588,7 @@ void pid_control_reset(PIDControlLib* lib) {
 }
 
 bool pid_control_set_pid_params(PIDControlLib* lib, AxisType_E axis, float kp, float ki, float kd) {
-    if (!lib || !lib->initialized || axis >= AXIS_BUTT) {
+    if (!lib || !lib->initialized || axis >= AXIS_TOTAL) {
         return false;
     }
 
@@ -605,6 +616,8 @@ bool pid_control_set_pid_params(PIDControlLib* lib, AxisType_E axis, float kp, f
         lib->config.pid.vertical.kd = kd;
     }
 
+    printf("!!!PID params updated for axis %d: Kp=%.3f, Ki=%.3f, Kd=%.3f\n", axis, kp, ki, kd);
+
     return true;
 }
 
@@ -613,7 +626,7 @@ bool pid_control_get_pid_params(const PIDControlLib* lib,
                                 float* kp,
                                 float* ki,
                                 float* kd) {
-    if (!lib || !lib->initialized || axis >= AXIS_BUTT || !kp || !ki || !kd) {
+    if (!lib || !lib->initialized || axis >= AXIS_TOTAL || !kp || !ki || !kd) {
         return false;
     }
 
@@ -630,7 +643,7 @@ bool pid_control_set_prediction_enabled(PIDControlLib* lib, bool enabled) {
     }
 
     lib->config.features.enable_prediction = enabled;
-    for (int axis = 0; axis < AXIS_BUTT; ++axis) {
+    for (int axis = 0; axis < AXIS_TOTAL; ++axis) {
         lib->prediction_states[axis].prediction_enabled = enabled;
     }
     return true;
@@ -642,7 +655,7 @@ bool pid_control_set_d_filter_enabled(PIDControlLib* lib, bool enabled) {
     }
 
     lib->config.features.enable_d_filter = enabled;
-    for (int axis = 0; axis < AXIS_BUTT; ++axis) {
+    for (int axis = 0; axis < AXIS_TOTAL; ++axis) {
         lib->pid_controllers[axis].d_filter_enabled = enabled;
     }
     return true;
@@ -654,7 +667,7 @@ bool pid_control_set_prediction_guard_enabled(PIDControlLib* lib, bool enabled) 
     }
 
     lib->config.features.enable_prediction_guard = enabled;
-    for (int axis = 0; axis < AXIS_BUTT; ++axis) {
+    for (int axis = 0; axis < AXIS_TOTAL; ++axis) {
         lib->prediction_states[axis].guard_enabled = enabled;
     }
     return true;
@@ -666,7 +679,7 @@ bool pid_control_set_adaptive_guard_enabled(PIDControlLib* lib, bool enabled) {
     }
 
     lib->config.features.enable_prediction_adaptive_guard = enabled;
-    for (int axis = 0; axis < AXIS_BUTT; ++axis) {
+    for (int axis = 0; axis < AXIS_TOTAL; ++axis) {
         lib->prediction_states[axis].adaptive_guard_enabled = enabled;
     }
     return true;
@@ -711,7 +724,7 @@ bool pid_control_set_prediction_params(PIDControlLib* lib,
     lib->config.prediction.velocity_alpha = velocity_alpha;
     lib->config.prediction.max_shift_factor = max_shift_factor;
     lib->config.prediction.guard_ratio = guard_ratio;
-    for (int axis = 0; axis < AXIS_BUTT; ++axis) {
+    for (int axis = 0; axis < AXIS_TOTAL; ++axis) {
         lib->prediction_states[axis].guard_ratio = guard_ratio;
     }
     return true;
@@ -743,7 +756,7 @@ bool pid_control_set_pid_advanced_params(PIDControlLib* lib,
     lib->config.pid.d_filter_alpha = d_filter_alpha;
     lib->config.pid.integral_ratio = integral_ratio;
 
-    for (int axis = 0; axis < AXIS_BUTT; ++axis) {
+    for (int axis = 0; axis < AXIS_TOTAL; ++axis) {
         PIDController& pid = lib->pid_controllers[axis];
         pid.deadband = deadband_deg;
         pid.d_filter_alpha = d_filter_alpha;
@@ -772,7 +785,7 @@ bool pid_control_get_pid_advanced_params(const PIDControlLib* lib,
 }
 
 bool pid_control_get_pid_output(const PIDControlLib* lib, AxisType_E axis, float* output) {
-    if (!lib || !lib->initialized || axis >= AXIS_BUTT || !output) {
+    if (!lib || !lib->initialized || axis >= AXIS_TOTAL || !output) {
         return false;
     }
 
@@ -781,7 +794,7 @@ bool pid_control_get_pid_output(const PIDControlLib* lib, AxisType_E axis, float
 }
 
 bool pid_control_get_motor_level(const PIDControlLib* lib, AxisType_E axis, uint8_t* level) {
-    if (!lib || !lib->initialized || axis >= AXIS_BUTT || !level) {
+    if (!lib || !lib->initialized || axis >= AXIS_TOTAL || !level) {
         return false;
     }
 
@@ -793,7 +806,7 @@ bool pid_control_get_prediction_state(const PIDControlLib* lib,
                                       AxisType_E axis,
                                       float* current_deg,
                                       float* velocity_deg_per_sec) {
-    if (!lib || !lib->initialized || axis >= AXIS_BUTT || !current_deg || !velocity_deg_per_sec) {
+    if (!lib || !lib->initialized || axis >= AXIS_TOTAL || !current_deg || !velocity_deg_per_sec) {
         return false;
     }
 

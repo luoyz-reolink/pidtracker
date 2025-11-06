@@ -1,24 +1,30 @@
-#include "pid_tracker.h"
-
-#include <cstring>
+#include "pid_ctrl.h"
+#include "serial_mcu.h"
+#include <string.h>
 
 PIDCtrl* PIDCtrl::s_active_instance_ = nullptr;
 
+inline int get_motor_index(uint8_t axis)
+{
+    switch(axis) {
+        case AXIS_HORIZONTAL:
+            return P_MOTOR;
+        case AXIS_VERTICAL:
+            return T_MOTOR;
+        default:
+            break;
+    }
+    
+    return -1;
+}
+
 PIDCtrl::PIDCtrl()
     : lib_(nullptr),
-      target_info_{0.0f, 0.0f, false},
-      horizontal_angle_deg_(0.0f),
-      vertical_angle_deg_(0.0f),
+      target_info_{0.0f, 0.0f, false, 0, -1},
       external_target_callback_(nullptr),
-      external_read_horizontal_callback_(nullptr),
-      external_read_vertical_callback_(nullptr),
-      external_motor_h_write_callback_(nullptr),
-      external_motor_h_enable_callback_(nullptr),
-      external_motor_h_dir_callback_(nullptr),
-      external_motor_v_write_callback_(nullptr),
-      external_motor_v_enable_callback_(nullptr),
-      external_motor_v_dir_callback_(nullptr),
-      external_delay_callback_(nullptr),
+      external_read_angle_callback_(nullptr),
+      external_motor_set_speed_callback_(nullptr),
+      external_motor_disable_callback_(nullptr),
       initialized_(false),
       running_(false) {}
 
@@ -82,17 +88,20 @@ void PIDCtrl::Shutdown() {
     }
 }
 
-void PIDCtrl::UpdateTarget(float x_pixel, float y_pixel, bool visible) {
-    std::lock_guard<std::mutex> lock(target_mutex_);
+void PIDCtrl::UpdateTarget(float x_pixel, float y_pixel, bool visible, uint64_t pts, int32_t rid) {
     target_info_.x_pixel = x_pixel;
     target_info_.y_pixel = y_pixel;
     target_info_.visible = visible;
+    target_info_.pts = pts;
+    target_info_.rid = rid;
+}
+
+void PIDCtrl::UpdateTarget(TargetInfo info) {
+    target_info_ = info;
 }
 
 void PIDCtrl::UpdateGimbalAngles(float horizontal_deg, float vertical_deg) {
-    std::lock_guard<std::mutex> lock(angle_mutex_);
-    horizontal_angle_deg_ = horizontal_deg;
-    vertical_angle_deg_ = vertical_deg;
+
 }
 
 void PIDCtrl::Start() {
@@ -141,143 +150,117 @@ const PIDControlConfig* PIDCtrl::GetConfig() const {
     return pid_control_get_config(lib_);
 }
 
+bool PIDCtrl::SetPidParams(float kp_h, float ki_h, float kd_h, float kp_v, float ki_v, float kd_v) {
+    if (!initialized_) {
+        return false;
+    }
+
+    bool ok_h = pid_control_set_pid_params(lib_, AXIS_HORIZONTAL, kp_h, ki_h, kd_h);
+    bool ok_v = pid_control_set_pid_params(lib_, AXIS_VERTICAL, kp_v, ki_v, kd_v);
+    return ok_h && ok_v;
+}
+
+bool PIDCtrl::SetFunctionEnable(bool prediction_enable, bool d_filter_enable, bool prediction_guard_enable, bool adaptive_guard_enable) {
+    if (!initialized_) {
+        return false;
+    }
+
+    bool ok1 = pid_control_set_prediction_enabled(lib_, prediction_enable);
+    bool ok2 = pid_control_set_d_filter_enabled(lib_, d_filter_enable);
+    bool ok3 = pid_control_set_prediction_guard_enabled(lib_, prediction_guard_enable);
+    bool ok4 = pid_control_set_adaptive_guard_enabled(lib_, adaptive_guard_enable);
+    return ok1 && ok2 && ok3 && ok4;
+}
+
+
 /* ---------- Static Callback Wrappers ---------- */
 
-bool PIDCtrl::TargetPixelCallback(float* x_pixel, float* y_pixel) {
+bool PIDCtrl::get_target_pixel_callback(float* x_pixel, float* y_pixel, uint64_t *pts) {
     PIDCtrl* self = s_active_instance_;
     if (!self) {
         return false;
     }
-    return self->GetTargetPixel(x_pixel, y_pixel);
+    return self->GetTargetPixel(x_pixel, y_pixel, pts);
 }
 
-float PIDCtrl::ReadHorizontalAngleCallback() {
+float PIDCtrl::read_angle_callback(uint8_t axis) {
     PIDCtrl* self = s_active_instance_;
     if (!self) {
         return 0.0f;
     }
-    return self->GetHorizontalAngle();
+    return self->GetAngle(axis);
 }
 
-float PIDCtrl::ReadVerticalAngleCallback() {
+void PIDCtrl::motor_set_speed_callback(uint8_t axis, uint8_t level, uint8_t direction) {
     PIDCtrl* self = s_active_instance_;
     if (!self) {
-        return 0.0f;
+        return;
     }
-    return self->GetVerticalAngle();
+    self->MotorSetSpeed(axis, level, direction);
 }
+
+void PIDCtrl::motor_disable_callback(uint8_t axis) {
+    PIDCtrl* self = s_active_instance_;
+    if (!self) {
+        return;
+    }
+    self->MotorDisable(axis);
+}
+
 /* ---------- Instance Helpers ---------- */
 
-bool PIDCtrl::GetTargetPixel(float* x_pixel, float* y_pixel) const {
+bool PIDCtrl::GetTargetPixel(float* x_pixel, float* y_pixel, uint64_t *pts) const {
     if (external_target_callback_) {
-        return external_target_callback_(x_pixel, y_pixel);
+        return external_target_callback_(x_pixel, y_pixel, pts);
     }
 
-    std::lock_guard<std::mutex> lock(target_mutex_);
-    if (!target_info_.visible) {
+    if(target_info_.visible == false) {
         return false;
     }
-
     *x_pixel = target_info_.x_pixel;
     *y_pixel = target_info_.y_pixel;
+    *pts = target_info_.pts;
     return true;
 }
 
-float PIDCtrl::GetHorizontalAngle() const {
-    if (external_read_horizontal_callback_) {
-        return external_read_horizontal_callback_();
+float PIDCtrl::GetAngle(uint8_t axis) const {
+    if (external_read_angle_callback_) {
+        return external_read_angle_callback_(axis);
     }
-
-    std::lock_guard<std::mutex> lock(angle_mutex_);
-    return horizontal_angle_deg_;
+    
+    return 0.0f;
 }
 
-float PIDCtrl::GetVerticalAngle() const {
-    if (external_read_vertical_callback_) {
-        return external_read_vertical_callback_();
-    }
-
-    std::lock_guard<std::mutex> lock(angle_mutex_);
-    return vertical_angle_deg_;
-}
-
-void PIDCtrl::HandleHorizontalPhase(uint8_t pattern) {
-    if (external_motor_h_write_callback_) {
-        external_motor_h_write_callback_(pattern);
-    }
-    (void)pattern;
-}
-
-void PIDCtrl::HandleHorizontalDriver(bool enable) {
-    if (external_motor_h_enable_callback_) {
-        external_motor_h_enable_callback_(enable);
-    }
-    (void)enable;
-}
-
-void PIDCtrl::HandleHorizontalDirection(bool reverse) {
-    if (external_motor_h_dir_callback_) {
-        external_motor_h_dir_callback_(reverse);
-    }
-    (void)reverse;
-}
-
-void PIDCtrl::HandleVerticalPhase(uint8_t pattern) {
-    if (external_motor_v_write_callback_) {
-        external_motor_v_write_callback_(pattern);
-    }
-    (void)pattern;
-}
-
-void PIDCtrl::HandleVerticalDriver(bool enable) {
-    if (external_motor_v_enable_callback_) {
-        external_motor_v_enable_callback_(enable);
-    }
-    (void)enable;
-}
-
-void PIDCtrl::HandleVerticalDirection(bool reverse) {
-    if (external_motor_v_dir_callback_) {
-        external_motor_v_dir_callback_(reverse);
-    }
-    (void)reverse;
-}
-
-void PIDCtrl::HandleDelay(uint32_t milliseconds) {
-    if (external_delay_callback_) {
-        external_delay_callback_(milliseconds);
+void PIDCtrl::MotorSetSpeed(uint8_t axis, uint8_t level, uint8_t direction) {
+    if (external_motor_set_speed_callback_) {
+        external_motor_set_speed_callback_(axis, level, direction);
         return;
     }
-
-#if defined(_WIN32)
-    ::Sleep(milliseconds);
-#else
-    usleep(milliseconds * 1000U);
-#endif
+    printf("Set Motor Speed: Axis=%u, Level=%u, Direction=%u\n", axis, level, direction);
+    int motor = get_motor_index(axis);
+    serial_mcu_set_speed_level(motor, level, direction);
 }
 
-void PIDCtrl::InstallHardwareInterface(const HardwareInterface* hw_override) {
-    std::memset(&hw_interface_, 0, sizeof(hw_interface_));
+void PIDCtrl::MotorDisable(uint8_t axis) {
+    if (external_motor_disable_callback_) {
+        external_motor_disable_callback_(axis);
+        return;
+    }
+    int motor = get_motor_index(axis);
+    serial_mcu_set_speed_level(motor, 0, 0);
+}
 
-    hw_interface_.get_target_pixel_position = &PIDTracker::TargetPixelCallback;
-    hw_interface_.read_horizontal_angle_deg = &PIDTracker::ReadHorizontalAngleCallback;
-    hw_interface_.read_vertical_angle_deg = &PIDTracker::ReadVerticalAngleCallback;
-    hw_interface_.motor_horizontal_write_phase_pattern = &PIDTracker::MotorHorizontalWritePhase;
-    hw_interface_.motor_horizontal_enable_driver = &PIDTracker::MotorHorizontalEnableDriver;
-    hw_interface_.motor_horizontal_set_direction = &PIDTracker::MotorHorizontalSetDirection;
-    hw_interface_.motor_vertical_write_phase_pattern = &PIDTracker::MotorVerticalWritePhase;
-    hw_interface_.motor_vertical_enable_driver = &PIDTracker::MotorVerticalEnableDriver;
-    hw_interface_.motor_vertical_set_direction = &PIDTracker::MotorVerticalSetDirection;
-    hw_interface_.delay_ms = &PIDTracker::DelayMsCallback;
+
+void PIDCtrl::InstallHardwareInterface(const HardwareInterface* hw_override) {
+    memset(&hw_interface_, 0, sizeof(hw_interface_));
+
+    hw_interface_.get_target_pixel_position = &PIDCtrl::get_target_pixel_callback;
+    hw_interface_.read_angle_deg = &PIDCtrl::read_angle_callback;
+    hw_interface_.motor_set_speed = &PIDCtrl::motor_set_speed_callback;
+    hw_interface_.motor_disable = &PIDCtrl::motor_disable_callback;
 
     external_target_callback_ = hw_override ? hw_override->get_target_pixel_position : nullptr;
-    external_read_horizontal_callback_ = hw_override ? hw_override->read_horizontal_angle_deg : nullptr;
-    external_read_vertical_callback_ = hw_override ? hw_override->read_vertical_angle_deg : nullptr;
-    external_motor_h_write_callback_ = hw_override ? hw_override->motor_horizontal_write_phase_pattern : nullptr;
-    external_motor_h_enable_callback_ = hw_override ? hw_override->motor_horizontal_enable_driver : nullptr;
-    external_motor_h_dir_callback_ = hw_override ? hw_override->motor_horizontal_set_direction : nullptr;
-    external_motor_v_write_callback_ = hw_override ? hw_override->motor_vertical_write_phase_pattern : nullptr;
-    external_motor_v_enable_callback_ = hw_override ? hw_override->motor_vertical_enable_driver : nullptr;
-    external_motor_v_dir_callback_ = hw_override ? hw_override->motor_vertical_set_direction : nullptr;
-    external_delay_callback_ = hw_override ? hw_override->delay_ms : nullptr;
+    external_read_angle_callback_ = hw_override ? hw_override->read_angle_deg : nullptr;
+    external_motor_set_speed_callback_ = hw_override ? hw_override->motor_set_speed : nullptr;
+    external_motor_disable_callback_ = hw_override ? hw_override->motor_disable : nullptr;
 }

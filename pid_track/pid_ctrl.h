@@ -2,8 +2,7 @@
 #define PRODUCT_MODULES_ENC_SRC_PID_CTRL_H
 
 #include "pid_control_lib.h"
-
-#include <mutex>
+#include <stdio.h>
 
 /**
  * @brief 目标像素信息，作为视觉算法与 PID 控制库之间的数据桥梁。
@@ -12,6 +11,8 @@ struct TargetInfo {
     float x_pixel;    ///< 目标中心点相对图像的 X 像素坐标
     float y_pixel;    ///< 目标中心点相对图像的 Y 像素坐标
     bool  visible;    ///< 当前帧是否检测到目标
+    uint64_t pts;     ///< 目标信息的时间戳（单位：毫秒）
+    int32_t rid;      ///< 目标的唯一标识符
 };
 
 /**
@@ -46,7 +47,9 @@ public:
      * @param y_pixel 目标中心点 Y 像素坐标。
      * @param visible 是否检测到目标。
      */
-    void UpdateTarget(float x_pixel, float y_pixel, bool visible);
+    void UpdateTarget(float x_pixel, float y_pixel, bool visible, uint64_t pts, int32_t rid);
+
+    void UpdateTarget(TargetInfo info);
 
     /**
      * @brief 更新云台当前姿态角（若外部没有覆盖角度回调时使用）。
@@ -73,20 +76,27 @@ public:
     /** @brief 获取底层配置，便于调试。 */
     const PIDControlConfig* GetConfig() const;
 
+    /** @brief 设置 PID 参数。 */
+    bool SetPidParams(float kp_h, float ki_h, float kd_h,
+                      float kp_v, float ki_v, float kd_v);
+    
+    /** @brief 启用或禁用预测器、D 滤波器和预测保护功能。 */
+    bool SetFunctionEnable(bool prediction_enable, bool d_filter_enable, bool prediction_guard_enable, bool adaptive_guard_enable);
+
     /** @brief 判断库是否已完成初始化。 */
     bool IsInitialized() const { return initialized_; }
 
 private:
     /* ---------- 底层回调适配 ---------- */
-    static bool TargetPixelCallback(float* x_pixel, float* y_pixel);
-    static float ReadHorizontalAngleCallback();
-    static float ReadVerticalAngleCallback();
-    static void MotorSetSpeedCallback(uint8_t axis,uint8_t level, uint8_t direction);
+    static bool get_target_pixel_callback(float* x_pixel, float* y_pixel, uint64_t *pts);
+    static float read_angle_callback(uint8_t axis);
+    static void motor_set_speed_callback(uint8_t axis,uint8_t level, uint8_t direction);
+    static void motor_disable_callback(uint8_t axis);
 
-    bool GetTargetPixel(float* x_pixel, float* y_pixel) const;
-    float GetHorizontalAngle() const;
-    float GetVerticalAngle() const;
+    bool GetTargetPixel(float* x_pixel, float* y_pixel, uint64_t *pts) const;
+    float GetAngle(uint8_t axis) const;
     void MotorSetSpeed(uint8_t axis,uint8_t level, uint8_t direction);
+    void MotorDisable(uint8_t axis);
 
     void InstallHardwareInterface(const HardwareInterface* hw_override);
 
@@ -97,17 +107,14 @@ private:
     HardwareInterface hw_interface_;
 
     TargetInfo target_info_;
-    mutable std::mutex target_mutex_;
 
-    float horizontal_angle_deg_;
-    float vertical_angle_deg_;
-    mutable std::mutex angle_mutex_;
+    float angle_deg_[2];  // 0: horizontal, 1: vertical
 
     /* 记录外部覆盖的硬件回调（可选） */
-    GetTargetPixelPositionCallback external_target_callback_;
-    ReadAngleCallback external_read_horizontal_callback_;
-    ReadAngleCallback external_read_vertical_callback_;
-    MotorSetSpeedCallback* external_motor_set_speed_callback_;
+    GetTargetPixelPtsCallback external_target_callback_;
+    ReadAngleCallback external_read_angle_callback_;
+    MotorSetSpeedCallback external_motor_set_speed_callback_;
+    MotorDisableCallback external_motor_disable_callback_;
 
     bool initialized_;
     bool running_;

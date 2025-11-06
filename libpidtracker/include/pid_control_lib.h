@@ -34,12 +34,12 @@ typedef struct PIDControlLib PIDControlLib;
 typedef enum {
     AXIS_HORIZONTAL = 0,
     AXIS_VERTICAL = 1,
-    AXIS_BUTT = 2
+    AXIS_TOTAL = 2,
 } AxisType_E;
 
 /* 硬件接口回调函数类型 */
 // 获取目标据中心点的偏移像素数量
-typedef bool (*GetTargetPixelPositionCallback)(float *x_pixel, float *y_pixel);
+typedef bool (*GetTargetPixelPtsCallback)(float *x_pixel, float *y_pixel, uint64_t *pts);
 // 获取当前云台的姿态角度（单位：度）
 typedef float (*ReadAngleCallback)(uint8_t axis);
 // 设置电机速度档位
@@ -49,7 +49,7 @@ typedef void (*MotorDisableCallback)(uint8_t axis);
 
 /* 硬件接口结构体 */
 typedef struct {
-    GetTargetPixelPositionCallback get_target_pixel_position;
+    GetTargetPixelPtsCallback get_target_pixel_position;
     ReadAngleCallback read_angle_deg;
     MotorSetSpeedCallback motor_set_speed;
     MotorDisableCallback motor_disable;
