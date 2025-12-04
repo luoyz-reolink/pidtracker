@@ -1,1 +1,0 @@
-// Legacy C implementation removed. Use pid_control_lib.cpp for the current C++ version.

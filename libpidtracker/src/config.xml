@@ -4,20 +4,35 @@
     <system_parameters>
         <!-- ai帧率 -->
         <ai_frame_rate_hz>10</ai_frame_rate_hz>
+        <!-- 电机参数 -->
         <!-- 电机速度等级值（64个） -->
-        <speed_levels max_speed_level="16" s0="1" s1="2" s2="3" s3="4" s4="5" s5="6" s6="7" s7="8" s8="9" s9="10" s10="11" s11="12" s12="13" s13="14" s14="15" s15="16"/>
+        <speed_levels max_speed_level="16" s0="5.625" s1="6" s2="6.43" s3="6.92" s4="7.5" s5="8.18" s6="9" s7="10" s8="11.25" s9="12.86" s10="15" s11="18" s12="22.5" s13="30" s14="45" s15="90"/>
+        <!-- 电机最小角速度（度/秒） -->
+        <motor_vmin_deg_per_sec>0.0</motor_vmin_deg_per_sec>
         <!-- 电机最大角速度（度/秒） -->
-        <motor_vmax_deg_per_sec>60.0</motor_vmax_deg_per_sec>
-        
+        <motor_vmax_deg_per_sec>90.0</motor_vmax_deg_per_sec>
+        <!-- 电机T方向最小步数 -->
+        <motor_t_min_steps>0</motor_t_min_steps>
+        <!-- 电机T方向最大步数 -->
+        <motor_t_max_steps>1024</motor_t_max_steps>
+        <!-- T电机 0:步数最小时水平 1:步数最小是垂直 -->
+        <motor_t_orientation>0</motor_t_orientation>
+        <!-- 电机T方向最小的角 -->
+        <motor_t_min_angle>0.0</motor_t_min_angle>
+        <!-- 电机T方向最大的角 -->
+        <motor_t_max_angle>90.0</motor_t_max_angle>
+        <!-- 镜头的焦距（就1个的话就瞎填了，反正用不着） -->
+        <focal-length length="1" f0="5.92"/>
+
         <!-- 图像和视场参数 -->
         <!-- ai码流宽度 -->
         <frame_width_pixels>640.0</frame_width_pixels>
         <!-- ai码流高度 -->
-        <frame_height_pixels>480.0</frame_height_pixels>
+        <frame_height_pixels>352.0</frame_height_pixels>
         <!-- 水平视场角 -->
-        <horizontal_fov_deg>60.0</horizontal_fov_deg>
+        <horizontal_fov_deg>105</horizontal_fov_deg>
         <!-- 垂直视场角 -->
-        <vertical_fov_deg>45.0</vertical_fov_deg>
+        <vertical_fov_deg>60</vertical_fov_deg>
     </system_parameters>
     
     <!-- PID 附加参数 -->
@@ -26,23 +41,23 @@
         <deadband_deg>0.02</deadband_deg>
         <!-- D滤波系数 -->
         <d_filter_alpha>0.2</d_filter_alpha>
-        <!-- 积分系数(暂时不需要) -->
-        <integral_ratio>0.0</integral_ratio>
-        <!-- 积分限幅(暂时不需要) -->
-        <guard_epsilon>0</guard_epsilon>
+        <!-- 积分系数 -->
+        <integral_ratio>0.8</integral_ratio>
+        <!-- 积分限幅 -->
+        <guard_epsilon>0.000001</guard_epsilon>
         
         <!-- 水平轴PID参数 -->
         <horizontal>
-            <kp>0.8</kp>
-            <ki>0.15</ki>
-            <kd>0.05</kd>
+            <kp>3</kp>
+            <ki>0</ki>
+            <kd>0.1</kd>
         </horizontal>
         
         <!-- 垂直轴PID参数 -->
         <vertical>
-            <kp>0.8</kp>
-            <ki>0.15</ki>
-            <kd>0.05</kd>
+            <kp>3.5</kp>
+            <ki>0</ki>
+            <kd>0.1</kd>
         </vertical>
     </pid_parameters>
     
@@ -67,13 +82,13 @@
     <!-- 功能开关 -->
     <feature_switches>
         <!-- 使能预测 -->
-        <enable_prediction>1</enable_prediction>
+        <enable_prediction>0</enable_prediction>
         <!-- 使能D滤波 -->
-        <enable_d_filter>1</enable_d_filter>
+        <enable_d_filter>0</enable_d_filter>
         <!-- 使能预测保护 -->
-        <enable_prediction_guard>1</enable_prediction_guard>
+        <enable_prediction_guard>0</enable_prediction_guard>
         <!-- 使能预测保护自适应 -->
-        <enable_prediction_adaptive_guard>1</enable_prediction_adaptive_guard>
+        <enable_prediction_adaptive_guard>0</enable_prediction_adaptive_guard>
     </feature_switches>
     
 </pid_control_config>
