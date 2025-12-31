@@ -4,6 +4,22 @@
 #include <cstdint>
 #include <limits>
 
+enum TRACKER_TIMER_E : std::uint8_t
+{
+    TRACKER_TIMER_TARGET_DISAPPEAR = 0,
+    TRACKER_TIMER_TARGET_STATIC = 1,
+    TRACKER_TIMER_DELAY = 2,
+    TRACKER_TIMER_TARGET_SWITCH = 3,
+    TRACKER_TIMER_BUTT
+};
+
+struct delay_timer_t
+{
+    std::uint64_t target_time_microseconds;
+    std::uint64_t previous_time_microseconds;
+    bool active;
+};
+
 class timer_ctrl
 {
 public:
@@ -19,21 +35,23 @@ public:
 
     void reset()
     {
-        m_current = 0;
-        m_previous = 0;
-        m_delay_target = 0;
-        m_delay_active = false;
-        cancel_delay();
+        for (auto& timer : m_delay_timers)
+        {
+            timer.target_time_microseconds = 0;
+            timer.previous_time_microseconds = 0;
+            timer.active = false;
+        }
     }
 
-    void update(std::uint64_t value, time_unit unit = time_unit::microseconds, bool update_previous = true)
+    void update(std::uint64_t value, time_unit unit = time_unit::microseconds)
     {
         std::uint64_t converted = to_micro(value, unit);
         m_current = converted;
-        if (update_previous || m_previous == 0)
-        {
-            m_previous = m_current;
-        }
+    }
+
+    void update_timer(uint8_t timer_type)
+    {
+        m_delay_timers[timer_type].previous_time_microseconds = m_current;
     }
 
     std::uint64_t current(time_unit unit = time_unit::microseconds) const
@@ -41,54 +59,57 @@ public:
         return from_micro(m_current, unit);
     }
 
-    std::uint64_t interval(time_unit unit = time_unit::microseconds) const
+    std::uint64_t interval(uint8_t timer_type = TRACKER_TIMER_E::TRACKER_TIMER_DELAY, time_unit unit = time_unit::microseconds) const
     {
-        std::uint64_t diff = m_current >= m_previous ? (m_current - m_previous) : 0;
+        if(m_delay_timers[timer_type].previous_time_microseconds == 0)
+        {
+            return 0;
+        }
+        std::uint64_t diff = m_current >= m_delay_timers[timer_type].previous_time_microseconds ? (m_current - m_delay_timers[timer_type].previous_time_microseconds) : 0;
         return from_micro(diff, unit);
     }
 
-    void set_delay(std::uint64_t duration, time_unit unit = time_unit::microseconds)
+    void set_delay(std::uint64_t duration, time_unit unit = time_unit::microseconds, uint8_t timer_type = TRACKER_TIMER_E::TRACKER_TIMER_TARGET_DISAPPEAR)
     {
         std::uint64_t converted = to_micro(duration, unit);
-        m_delay_target = converted;
-        m_previous = m_current;
-        m_delay_active = true;
+        m_delay_timers[timer_type].target_time_microseconds = converted;
+        m_delay_timers[timer_type].previous_time_microseconds = m_current;
+        m_delay_timers[timer_type].active = true;
     }
 
-    bool delay_active() const
+    bool delay_active(uint8_t timer_type) const
     {
-        return m_delay_active;
+        return m_delay_timers[timer_type].active;
     }
 
-    bool delay_reached() const
+    bool delay_reached(uint8_t timer_type) const
     {
-        if (!m_delay_active)
+        if (!delay_active(timer_type))
         {
             return true;
         }
-        return interval() >= m_delay_target;
+        return interval(timer_type) >= m_delay_timers[timer_type].target_time_microseconds;
     }
 
-    std::uint64_t delay_remaining(time_unit unit = time_unit::microseconds) const
+    std::uint64_t delay_remaining(uint8_t timer_type, time_unit unit = time_unit::microseconds) const
     {
-        if (!m_delay_active)
+        if (!delay_active(timer_type))
         {
             return 0;
         }
 
-        if (interval() >= m_delay_target)
+        if (interval(timer_type) >= m_delay_timers[timer_type].target_time_microseconds)
         {
             return 0;
         }
 
-        std::uint64_t diff = m_delay_target - interval();
+        std::uint64_t diff = m_delay_timers[timer_type].target_time_microseconds - interval(timer_type);
         return from_micro(diff, unit);
     }
 
-    void cancel_delay()
+    void cancel_delay(uint8_t timer_type)
     {
-        m_delay_active = false;
-        m_delay_target = 0;
+        m_delay_timers[timer_type].active = false;
     }
 
 private:
@@ -136,9 +157,7 @@ private:
 
 private:
     std::uint64_t m_current{0};
-    std::uint64_t m_previous{0};
-    std::uint64_t m_delay_target{0};
-    bool m_delay_active{false};
+    delay_timer_t m_delay_timers[TRACKER_TIMER_E::TRACKER_TIMER_BUTT]{0};
 };
 
 #endif // PRODUCT_MODULES_ENC_SRC_PID_TRACK_PID_TIMER_H_

@@ -1,353 +1,525 @@
-#include "tracker.h"
-#include <limits>
+#ifndef PRODUCT_MODULES_ENC_SRC_PID_TRACK_TRACKER_H_
+#define PRODUCT_MODULES_ENC_SRC_PID_TRACK_TRACKER_H_
 
-typedef struct
+#include <cstdint>
+#include <type_traits>
+#include <utility>
+#include <vector>
+#include <algorithm>
+#include <array>
+
+#include "msg_cfg_md_def.h"
+#include "md_ext.h"
+#include "pid_control_lib.h"
+#include "media_common.h"
+
+#include "Bc_MOTracker.h"
+#ifdef _SUPPORT_YOLOWORLD_TRACK_
+#include "Bc_OVDMOTracker.h"
+#endif
+
+
+
+
+#ifndef BIT
+#define BIT(x) (1U << (x))
+#endif
+#ifndef BIT64
+#define BIT64(x) (1ULL << (x))
+#endif
+
+struct TargetInfo {
+    float x_pixel;    ///< 目标中心点 X
+    float y_pixel;    ///< 目标中心点 Y
+    bool  visible;    ///< 是否可见
+    uint64_t pts;     ///< 时间戳 (us/ms 视来源而定)
+    int32_t rid;      ///< 目标ID
+
+    float proportion; ///< 目标占画面比例（0.0 - 1.0）
+};
+
+// 移除原 tracker_ctx_t，仅保留画面中心坐标作为独立成员变量
+
+class BaseTrackerUnified
 {
-    size_t table_offset;
-    int label;
-    ALARM_IN_IDX_E track_type;
-    void (Bc_MOTracker::*result_func)(MOTrackingResult *);
-} master_key_t;
 
-static std::unordered_map<int, master_key_t> g_master_key_map = {
-    {TRACK_PRIORITY_E::TRACK_TYPE_PERSON,
-     {.table_offset = offsetof(ai_mot_cache_t, pd_ai_mot_list),
-      .label = 2,
-      .track_type = ALARM_IN_IDX_E::ALARM_IN_IDX_AI_PEOPLE,
-      .result_func = &Bc_MOTracker::Bc_Get_PD_Result}},
-    {TRACK_PRIORITY_E::TRACK_TYPE_MOTOR_VEHICLE,
-     {.table_offset = offsetof(ai_mot_cache_t, vd_ai_mot_list),
-      .label = 3,
-      .track_type = ALARM_IN_IDX_E::ALARM_IN_IDX_AI_VEHICLE,
-      .result_func = &Bc_MOTracker::Bc_Get_VD_Result}},
-    {TRACK_PRIORITY_E::TRACK_TYPE_ANIMAL,
-     {.table_offset = offsetof(ai_mot_cache_t, ad_ai_mot_list),
-      .label = 1,
-      .track_type = ALARM_IN_IDX_E::ALARM_IN_IDX_AI_DOG_CAT,
-      .result_func = &Bc_MOTracker::Bc_Get_AD_Result}}};
+public:
+    BaseTrackerUnified() = default;
+    virtual ~BaseTrackerUnified() = default;
 
-MoTracker_::~MoTracker_()
-{
-    delete mp_mo_tracker;
-    mp_mo_tracker = nullptr;
-}
-
-bool MoTracker_::get_tracker_result(c_media_md* md, uint32_t chn, int handle, uint64_t support_bitmap) const
-{
-    (void)support_bitmap;
-    ai_mot_cache_t ai_mot_cache{};
-    m_detections.clear();
-    int ret = md->get_ai_mot_all(chn, &ai_mot_cache);
-    if(ret == _AI_RESULT_GET_ok_)
+    // 初始化：仅设置中心点坐标（原结构体已移除）
+    virtual bool init(uint16_t v_w_center, uint16_t v_h_center)
     {
-        for(auto &item : g_master_key_map)
+        m_v_w_center = v_w_center;
+        m_v_h_center = v_h_center;
+        return m_initialized; // 由派生类实际置位
+    }
+    // 重置(主要针对motracker这种需要保存目标状态的)
+    virtual bool reset() {return true;};
+
+    void set_map(std::unordered_map<int32_t, int32_t> classid_type_map) {
+        m_classid_type_map = std::move(classid_type_map);
+    }
+
+    // 获取当前帧所有目标数据（不同派生类实现各自来源）
+    virtual bool get_tracker_result(c_media_md* md, uint32_t chn, int handle, uint64_t support_bitmap) const { (void)md; (void)chn; (void)handle; (void)support_bitmap; return false; };
+    // 获取某种类型的目标数据
+    virtual bool get_specific_type(int32_t type) const {(void)type; return false;};
+    // 获取某个目标ID的目标数据
+    virtual bool get_specific_rid(TargetInfo& out_info) const { (void)out_info; return false; };
+    // 获取距离中心最近的目标数据
+    virtual bool get_closest(TargetInfo& out_info) const {(void)out_info; return false;};
+    uint64_t pts() const { return m_pts; }
+
+protected:
+    // 画面中心（原 tracker_ctx_t 中的两个字段）
+    uint16_t m_v_w_center{0};
+    uint16_t m_v_h_center{0};
+    mutable uint64_t m_pts = 0;
+    bool m_initialized = false;
+    // 类别ID到类型的映射(主要是yoloworld在筛选输送给tracker的数据时会用到，因为yoloworld的重复数据实在是太多了，一个戴眼镜、带帽子、穿衣服的人能被识别成好几个不同的类别ID，所以尽可能筛选一下防止他超过tracker的处理能力也就是50个目标)
+    std::unordered_map<int32_t, int32_t> m_classid_type_map;
+    // 当前锁定的目标（用于优先维持 RID）
+    TargetInfo m_current_target{0.f, 0.f, false, 0ULL, -1};
+};
+
+class MoTracker_ : public BaseTrackerUnified
+{
+public:
+    MoTracker_() : BaseTrackerUnified(), mp_mo_tracker(nullptr) {}
+    ~MoTracker_() override;
+
+    // =======================抽象函数实现========================
+    // 初始化（只接受中心点）
+    bool init(uint16_t v_w_center, uint16_t v_h_center) override
+    {
+        m_v_w_center = v_w_center;
+        m_v_h_center = v_h_center;
+        if(!mp_mo_tracker)
         {
-            ai_mot_pd_table_t *p_ai_mot_xd_table = NULL;
- 
-            p_ai_mot_xd_table = (ai_mot_pd_table_t *)(((char *)&ai_mot_cache) + item.second.table_offset);
-            if(p_ai_mot_xd_table->count > 0)
-            {
-                Object cur_obj;
-                for(unsigned int i = 0; i < p_ai_mot_xd_table->count; i++)
-                {
-                    cur_obj.xmin = p_ai_mot_xd_table->objects[i].x_min;
-                    cur_obj.ymin = p_ai_mot_xd_table->objects[i].y_min;
-                    cur_obj.xmax = p_ai_mot_xd_table->objects[i].x_max;
-                    cur_obj.ymax = p_ai_mot_xd_table->objects[i].y_max;
-                    cur_obj.prob = p_ai_mot_xd_table->objects[i].score;
-                    cur_obj.label = item.second.label;
-                    {
-                        // 使用显式指针区间，避免对 std::begin/std::end 的依赖导致模板约束失败
-                        auto *feat_begin = p_ai_mot_xd_table->objects[i].reid_feature;
-                        auto *feat_end   = p_ai_mot_xd_table->objects[i].reid_feature + (sizeof(p_ai_mot_xd_table->objects[i].reid_feature)/sizeof(p_ai_mot_xd_table->objects[i].reid_feature[0]));
-                        cur_obj.curr_feat.assign(feat_begin, feat_end);
-                    }
-                    m_detections.emplace_back(cur_obj);
-                }
-            }
+            mp_mo_tracker = new Bc_MOTracker(30, m_v_w_center * 2, m_v_h_center * 2);
         }
-
-        if(mp_mo_tracker)
-        {
-            mp_mo_tracker->update(m_detections);
-        }
+        m_initialized = (mp_mo_tracker != nullptr);
+        return m_initialized;
     }
+    bool reset() override { mp_mo_tracker->Bc_MOTrcaker_Reset(); return true; }
 
-    // 更新当前PTS
-    m_pts = ai_mot_cache.pd_ai_mot_list.pts;
+    // 获取当前帧所有目标数据（不同派生类实现各自来源）
+    bool get_tracker_result(c_media_md* md, uint32_t chn, int handle, uint64_t support_bitmap) const override;
 
-    // MoTracker的结果获取比较特殊，可以直接根据类型获取对应的结果，所以这里就不先获取全部结果缓存了
-    return ret == _AI_RESULT_GET_ok_ && m_detections.size() > 0;
-}
+    // 获取某种类型的目标数据
+    bool get_specific_type(int32_t type) const override;
+
+    // 获取某个目标ID的目标数据
+    bool get_specific_rid(TargetInfo& out_info) const override;
+
+    // 获取距离中心最近的目标数据
+    bool get_closest(TargetInfo& out_info) const override;
+
+    //=======================工具函数========================
 
 
-bool MoTracker_::get_specific_type(int32_t type) const
+private:
+    Bc_MOTracker *mp_mo_tracker;
+    MOTrackingResult xd_result;
+};
+
+// media比较特殊，在enc里面已经获取到了ai结果，所以这里直接用媒体的结果
+class MediaTracker_ : public BaseTrackerUnified
 {
-    // 不在注册的类型里就不处理
-    if(g_master_key_map.find(type) == g_master_key_map.end())
-    {
-        return false;
-    }
+public:
+    MediaTracker_() : BaseTrackerUnified() {}
+    ~MediaTracker_() override = default;
 
-    (mp_mo_tracker->*g_master_key_map.at(type).result_func)(&xd_result);
-    return xd_result.count > 0;
-}
-
-bool MoTracker_::get_specific_rid(TargetInfo& out_info) const
-{
-    int rid = out_info.rid;
-    for(unsigned int i = 0; i < xd_result.count; i++)
-    {
-        if(xd_result.objects[i].rid == rid)
-        {
-            out_info.x_pixel = (static_cast<float>(xd_result.objects[i].x_min) + static_cast<float>(xd_result.objects[i].x_max)) * 0.5f;
-            out_info.y_pixel = (static_cast<float>(xd_result.objects[i].y_min) + static_cast<float>(xd_result.objects[i].y_max)) * 0.5f;
-            out_info.visible = true;
-            out_info.rid = rid;
-            return true;
-        }
-    }
-    return false;
-}
-
-bool MoTracker_::get_closest(TargetInfo& out_info) const
-{
-    if(xd_result.count <= 0)
-    {
-        return false;
-    }
-
-    // 线性扫描找到距离中心最近的目标，避免对不可移动/不可赋值类型进行排序移动
-    unsigned int best_idx = 0;
-    float best_dist = std::numeric_limits<float>::max();
-    for (unsigned int i = 0; i < xd_result.count; ++i)
-    {
-        const MOTrackingST &o = xd_result.objects[i];
-        float cx = (static_cast<float>(o.x_min) + static_cast<float>(o.x_max)) * 0.5f;
-        float cy = (static_cast<float>(o.y_min) + static_cast<float>(o.y_max)) * 0.5f;
-        float dx = cx - static_cast<float>(m_v_w_center);
-        float dy = cy - static_cast<float>(m_v_h_center);
-        float dist = dx*dx + dy*dy;
-        if (dist < best_dist)
-        {
-            best_dist = dist;
-            best_idx = i;
-        }
-    }
-
-    const MOTrackingST &obj = xd_result.objects[best_idx];
-    out_info.x_pixel = (static_cast<float>(obj.x_min) + static_cast<float>(obj.x_max)) * 0.5f;
-    out_info.y_pixel = (static_cast<float>(obj.y_min) + static_cast<float>(obj.y_max)) * 0.5f;
-    out_info.visible = true;
-    out_info.rid = obj.rid;
-    return true;
-}
-
-// ======================= MediaTracker_ 实现 =======================
-bool MediaTracker_::get_tracker_result(c_media_md* md, uint32_t chn, int handle, uint64_t support_bitmap) const
-{
-    static uint64_t last_pts = 0;
-    if(m_last_pd_table->pts == m_last_vd_table->pts  && m_last_pd_table->pts == m_last_ad_table->pts && m_last_pd_table->pts > last_pts)
-    {
-        m_pts = m_last_pd_table->pts;
-        last_pts = m_pts;
+    bool init(uint16_t v_w_center, uint16_t v_h_center) override {
+        m_v_w_center = v_w_center;
+        m_v_h_center = v_h_center;
+        m_initialized = true;
         return true;
     }
-    return false;
-}
 
-bool MediaTracker_::get_specific_type(int32_t type) const
-{
-    switch (type) {
-            case TRACK_PRIORITY_E::TRACK_TYPE_PERSON:
-                m_selected_type = m_last_pd_table;
+    // 从媒体缓存拉取检测数据
+    bool get_tracker_result(c_media_md* md, uint32_t chn, int handle, uint64_t support_bitmap) const override;
+
+    // 选择某种类型（并缓存以供后续 rid/closest 查询）
+    bool get_specific_type(int32_t type) const override;
+
+    // 查询指定 rid 的像素位置
+    bool get_specific_rid(TargetInfo& out_info) const override;
+
+    // 获取距离中心最近的目标
+    bool get_closest(TargetInfo& out_info) const override;
+
+    void get_pdata_by_type(int32_t type, void* pdata) const {
+        switch(type)
+        {
+            case _AI_TYPE_pd_:
+                m_last_pd_table = reinterpret_cast<ai_action_pd_table_t*>(pdata);
                 break;
-            case TRACK_PRIORITY_E::TRACK_TYPE_MOTOR_VEHICLE:
-                m_selected_type = reinterpret_cast<ai_action_pd_table_t*>(m_last_vd_table);
+            case _AI_TYPE_vd_:
+                m_last_vd_table = reinterpret_cast<ai_action_vd_table_t*>(pdata);
                 break;
-            case TRACK_PRIORITY_E::TRACK_TYPE_ANIMAL:
-                m_selected_type = reinterpret_cast<ai_action_pd_table_t*>(m_last_ad_table);
+            case _AI_TYPE_ad_:
+                m_last_ad_table = reinterpret_cast<ai_action_ad_table_t*>(pdata);
                 break;
             default:
-                m_selected_type = nullptr;
+                break;
         }
-    return m_selected_type != nullptr;
-}
-
-bool MediaTracker_::get_specific_rid(TargetInfo& out_info) const
-{
-    if(m_selected_type == nullptr)
-    {
-        return false;
     }
-    for(unsigned int i = 0; i < m_selected_type->count; i++)
+
+
+private:
+    // 最近一次的 people AI ACTION 缓存
+    mutable ai_action_pd_table_t* m_last_pd_table{nullptr};
+    // 最近一次的 vehicle AI ACTION 缓存
+    mutable ai_action_vd_table_t* m_last_vd_table{nullptr};
+    // 最近一次的 animal AI ACTION 缓存
+    mutable ai_action_ad_table_t* m_last_ad_table{nullptr};
+    // 最近一次选择的类型
+    mutable ai_action_pd_table_t* m_selected_type{nullptr};
+};
+
+#ifdef _SUPPORT_YOLOWORLD_TRACK_
+class OvdTracker_ : public BaseTrackerUnified
+{
+public:
+    OvdTracker_() : BaseTrackerUnified() {}
+    ~OvdTracker_() override;
+
+    bool init(uint16_t v_w_center, uint16_t v_h_center) override
     {
-        if(m_selected_type->objects[i].rid == out_info.rid)
+        m_v_w_center = v_w_center;
+        m_v_h_center = v_h_center;
+        if(!mp_ovd_tracker)
         {
-            out_info.x_pixel = (static_cast<float>(m_selected_type->objects[i].x_min) + static_cast<float>(m_selected_type->objects[i].x_max)) * 0.5f;
-            out_info.y_pixel = (static_cast<float>(m_selected_type->objects[i].y_min) + static_cast<float>(m_selected_type->objects[i].y_max)) * 0.5f;
-            out_info.pts = m_pts;
-            out_info.visible = true;
-            return true;
+            mp_ovd_tracker = new Bc_OVDTracker(30, m_v_w_center * 2, m_v_h_center * 2);
         }
-    }
-    return false;
-}
-
-bool MediaTracker_::get_closest(TargetInfo& out_info) const
-{
-    if(m_selected_type == nullptr || m_selected_type->count == 0)
-    {
-        return false;
+        m_initialized = (mp_ovd_tracker != nullptr);
+        return m_initialized;
     }
 
-    // 线性扫描找到距离中心最近的目标，避免对不可移动/不可赋值类型进行排序移动
-    unsigned int best_idx = 0;
-    float best_dist = std::numeric_limits<float>::max();
-    for (unsigned int i = 0; i < m_selected_type->count; ++i)
+    bool reset() override 
     {
-        const auto &o = m_selected_type->objects[i];
-        float cx = (static_cast<float>(o.x_min) + static_cast<float>(o.x_max)) * 0.5f;
-        float cy = (static_cast<float>(o.y_min) + static_cast<float>(o.y_max)) * 0.5f;
-        float dx = cx - static_cast<float>(m_v_w_center);
-        float dy = cy - static_cast<float>(m_v_h_center);
-        float dist = dx*dx + dy*dy;
-        if (dist < best_dist)
+        if(m_initialized)
         {
-            best_dist = dist;
-            best_idx = i;
+            // mp_ovd_tracker->Reset();
+            
         }
+        return true;
     }
 
-    const auto &obj = m_selected_type->objects[best_idx];
-    out_info.x_pixel = (static_cast<float>(obj.x_min) + static_cast<float>(obj.x_max)) * 0.5f;
-    out_info.y_pixel = (static_cast<float>(obj.y_min) + static_cast<float>(obj.y_max)) * 0.5f;
-    out_info.visible = true;
-    out_info.pts = m_pts;
-    out_info.rid = obj.rid;
+    // 获取当前帧所有目标数据（不同派生类实现各自来源）
+    bool get_tracker_result(c_media_md* md, uint32_t chn, int handle, uint64_t support_bitmap) const override;
 
-    return true;
-}
+    // 获取某种类型的目标数据
+    bool get_specific_type(int32_t type) const override;
 
-// ======================= OvdTracker_ 实现（暂用媒体同逻辑） =======================
-OvdTracker_::~OvdTracker_() {}
+    // 获取某个目标ID的目标数据
+    bool get_specific_rid(TargetInfo& out_info) const override;
 
-bool OvdTracker_::init(uint16_t v_w_center, uint16_t v_h_center)
-{
-    m_v_w_center = v_w_center;
-    m_v_h_center = v_h_center;
-    // 若后续需要使用 OVD 库，可在此处创建实例：mp_ovd_tracker = new Bc_OVDMOTracker(...)
-    m_initialized = true;
-    return true;
-}
+    // 获取距离中心最近的目标数据
+    bool get_closest(TargetInfo& out_info) const override;
 
-bool OvdTracker_::get_tracker_result(c_media_md* md, uint32_t chn, int handle, uint64_t support_bitmap) const
-{
-    (void)handle; (void)support_bitmap;
-    ai_mot_cache_t cache{};
-    int ret = md->get_ai_mot_all(chn, &cache);
-    if(ret != _AI_RESULT_GET_ok_)
+    // =======================工具函数========================
+    int32_t type_to_classid(int32_t classid)
     {
-        return false;
+        static std::unordered_map<int32_t, int32_t> type_classid_map = {};
+        if(type_classid_map.find(classid) != type_classid_map.end())
+        {
+            return type_classid_map[classid];
+        }
+
+        for(const auto& pair : m_classid_type_map)
+        {
+            if(pair.second == classid)
+            {
+                type_classid_map[classid] = pair.first;
+                return pair.first;
+            }
+        }
+
+        type_classid_map[classid] = -1;
+        return -1;
     }
-    m_pts = cache.pd_ai_mot_list.pts;
-    return true;
-}
 
-bool OvdTracker_::get_specific_type(int32_t type) const
+private:
+    // OVD 跟踪器实例
+    Bc_OVDTracker* mp_ovd_tracker{nullptr};
+    // 最近一次获取的结果
+    std::array<std::vector<OVDTrackingST>, TRACK_PRIORITY_E::TRACK_TYPE_BUTT> m_last_cache{};
+    // 最近一次选择的类型
+    mutable int32_t m_selected_type{-1};
+};
+#endif // _SUPPORT_YOLOWORLD_TRACK_
+
+
+// ================= 已废弃 ===================================
+// ================= 统一设计抽象（模板绑定等） =================
+// 保留现有模板绑定与实现（tracker_detail / tracker），用于其他模块复用
+
+#if 0
+namespace tracker_detail
 {
-    m_selected_type = type;
 
-    // switch(type)
-    // {
-    // case TRACK_PRIORITY_E::TRACK_TYPE_PERSON:
-    //     return m_last_cache.pd_ai_mot_list.count > 0;
-    // case TRACK_PRIORITY_E::TRACK_TYPE_MOTOR_VEHICLE:
-    //     return m_last_cache.vd_ai_mot_list.count > 0;
-    // case TRACK_PRIORITY_E::TRACK_TYPE_ANIMAL:
-    //     return m_last_cache.ad_ai_mot_list.count > 0;
-    // default:
-    //     return false;
-    // }
-    return false;
-}
-
-bool OvdTracker_::get_specific_rid(TargetInfo& out_info) const
+template <typename T, typename U>
+struct always_false : std::false_type
 {
-    // 媒体基础表可能不包含稳定的 rid，返回不支持
-    (void)out_info;
-    return false;
-}
+};
 
-bool OvdTracker_::get_closest(TargetInfo& out_info) const
+template <typename TObject, typename TMotracker>
+struct TrackerBinding
 {
-    auto compute_dist = [this](int x_min, int x_max, int y_min, int y_max) {
-        float cx = (static_cast<float>(x_min) + static_cast<float>(x_max)) * 0.5f;
-        float cy = (static_cast<float>(y_min) + static_cast<float>(y_max)) * 0.5f;
-    float dx = cx - static_cast<float>(m_v_w_center);
-    float dy = cy - static_cast<float>(m_v_h_center);
-        return dx*dx + dy*dy;
+    static_assert(always_false<TObject, TMotracker>::value,
+                  "Unsupported tracker binding. Please provide a TrackerBinding specialization for this pair.");
+};
+
+template <>
+struct TrackerBinding<nullptr_t, nullptr_t>
+{
+    struct result_type
+    {
+        ai_action_ad_table_t ad_result;
+        ai_action_pd_table_t pd_result;
+        ai_action_vd_table_t vd_result;
     };
 
-    float best = std::numeric_limits<float>::max();
-    bool found = false;
-    int best_rid = -1; float best_x=0.f, best_y=0.f;
-
-    switch(m_selected_type)
+    static void process(nullptr_t &impl,
+                        const std::vector<nullptr_t> &detections,
+                        bool compensation,
+                        int delta_x,
+                        int delta_y)
     {
-    case TRACK_PRIORITY_E::TRACK_TYPE_PERSON:
-        for(unsigned int i=0; i<m_last_cache.pd_ai_mot_list.count; ++i)
-        {
-            const auto &obj = m_last_cache.pd_ai_mot_list.objects[i];
-            float d = compute_dist(obj.x_min, obj.x_max, obj.y_min, obj.y_max);
-            if(d < best)
-            {
-                best = d;
-                best_rid = -1;
-                best_x = (static_cast<float>(obj.x_min) + static_cast<float>(obj.x_max)) * 0.5f;
-                best_y = (static_cast<float>(obj.y_min) + static_cast<float>(obj.y_max)) * 0.5f;
-                found = true;
-            }
-        }
-        break;
-    case TRACK_PRIORITY_E::TRACK_TYPE_MOTOR_VEHICLE:
-        for(unsigned int i=0; i<m_last_cache.vd_ai_mot_list.count; ++i)
-        {
-            const auto &obj = m_last_cache.vd_ai_mot_list.objects[i];
-            float d = compute_dist(obj.x_min, obj.x_max, obj.y_min, obj.y_max);
-            if(d < best)
-            {
-                best = d;
-                best_rid = -1;
-                best_x = (static_cast<float>(obj.x_min) + static_cast<float>(obj.x_max)) * 0.5f;
-                best_y = (static_cast<float>(obj.y_min) + static_cast<float>(obj.y_max)) * 0.5f;
-                found = true;
-            }
-        }
-        break;
-    case TRACK_PRIORITY_E::TRACK_TYPE_ANIMAL:
-        for(unsigned int i=0; i<m_last_cache.ad_ai_mot_list.count; ++i)
-        {
-            const auto &obj = m_last_cache.ad_ai_mot_list.objects[i];
-            float d = compute_dist(obj.x_min, obj.x_max, obj.y_min, obj.y_max);
-            if(d < best)
-            {
-                best = d;
-                best_rid = -1;
-                best_x = (static_cast<float>(obj.x_min) + static_cast<float>(obj.x_max)) * 0.5f;
-                best_y = (static_cast<float>(obj.y_min) + static_cast<float>(obj.y_max)) * 0.5f;
-                found = true;
-            }
-        }
-        break;
-    default:
-        break;
+        (void)impl; (void)detections; (void)compensation; (void)delta_x; (void)delta_y; // No operation
     }
 
-    if(!found) return false;
-    out_info.x_pixel = best_x;
-    out_info.y_pixel = best_y;
-    out_info.visible = true;
-    out_info.rid = best_rid;
-    return true;
-}
+    static void reset(nullptr_t &impl)
+    {
+        (void)impl; // No operation
+    }
+
+    static void collect_results(nullptr_t &impl, result_type &out)
+    {
+        (void)impl; (void)out; // No operation
+    }
+    
+};
+
+template <>
+struct TrackerBinding<Object, Bc_MOTracker>
+{
+    struct result_type
+    {
+        MOTrackingResult ad_result;
+        MOTrackingResult pd_result;
+        MOTrackingResult vd_result;
+    };
+
+    static void process(Bc_MOTracker &impl,
+                        const std::vector<Object> &detections,
+                        bool compensation,
+                        int delta_x,
+                        int delta_y)
+    {
+        if (compensation)
+        {
+            impl.motion_compensation(delta_x, delta_y);
+        }
+        impl.update(detections);
+    }
+
+    static void reset(Bc_MOTracker &impl)
+    {
+        impl.Bc_MOTrcaker_Reset();
+    }
+
+    static void collect_results(Bc_MOTracker &impl, result_type &out)
+    {
+        impl.Bc_Get_AD_Result(&out.ad_result);
+        impl.Bc_Get_PD_Result(&out.pd_result);
+        impl.Bc_Get_VD_Result(&out.vd_result);
+    }
+
+    static bool get_specific_type(result_type &out, result_type &specific_result, int32_t type)
+    {
+        switch(type)
+        {
+            case TRACK_TYPE_PERSON:
+                specific_result.pd_result = out.pd_result;
+                break;
+            case TRACK_TYPE_MOTOR_VEHICLE:
+                specific_result.vd_result = out.vd_result;
+                break;
+            case TRACK_TYPE_ANIMAL:
+                specific_result.ad_result = out.ad_result;
+                break;
+            default:
+                break;  
+        }
+        return specific_result.pd_result.count > 0 ||
+               specific_result.vd_result.count > 0 ||
+               specific_result.ad_result.count > 0;
+    }
+
+    static bool get_specific_rid(const result_type &out, TargetInfo &target_info)
+    {
+        MOTrackingResult *result = nullptr;
+        if(out.pd_result.count > 0)
+        {
+            result = const_cast<MOTrackingResult*>(&out.pd_result);
+        }
+        else if(out.vd_result.count > 0)
+        {
+            result = const_cast<MOTrackingResult*>(&out.vd_result);
+        }
+        else if(out.ad_result.count > 0)
+        {
+            result = const_cast<MOTrackingResult*>(&out.ad_result);
+        }
+        else 
+        {
+            return false;
+        }
+        if(result == nullptr || result->count <= 0)
+        {
+            return false;
+        }
+
+        for(unsigned int i = 0; i < result->count; i++)
+        {
+            MOTrackingST obj = result->objects[i];
+            if(obj.rid == target_info.rid)
+            {
+                target_info.x_pixel = static_cast<float>( (obj.x_min + obj.x_max) / 2.0f );
+                target_info.y_pixel = static_cast<float>( (obj.y_min + obj.y_max) / 2.0f );
+                target_info.visible = true;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static bool get_closest(result_type &out, TargetInfo &target_info, uint16_t v_w_center, uint16_t v_h_center)
+    {
+        MOTrackingResult *result = nullptr;
+        if(out.pd_result.count > 0)
+        {
+            result = const_cast<MOTrackingResult*>(&out.pd_result);
+        }
+        else if(out.vd_result.count > 0)
+        {
+            result = const_cast<MOTrackingResult*>(&out.vd_result);
+        }
+        else if(out.ad_result.count > 0)
+        {
+            result = const_cast<MOTrackingResult*>(&out.ad_result);
+        }
+        else 
+        {
+            return false;
+        }
+        if(result == nullptr || result->count <= 0)
+        {
+            return false;
+        }
+
+        // 根据物体距离中心点的距离排序
+        stable_sort(result->objects, result->objects + result->count, [v_w_center, v_h_center](const MOTrackingST &a, const MOTrackingST &b) {
+            float a_dist = ( ( (a.x_min + a.x_max) / 2.0f - v_w_center ) * ( (a.x_min + a.x_max) / 2.0f - v_w_center )
+                           + ( (a.y_min + a.y_max) / 2.0f - v_h_center ) * ( (a.y_min + a.y_max) / 2.0f - v_h_center ) );
+            float b_dist = ( ( (b.x_min + b.x_max) / 2.0f - v_w_center ) * ( (b.x_min + b.x_max) / 2.0f - v_w_center )
+                           + ( (b.y_min + b.y_max) / 2.0f - v_h_center ) * ( (b.y_min + b.y_max) / 2.0f - v_h_center ) );
+            return a_dist < b_dist;
+        });
+
+        MOTrackingST obj = result->objects[0];
+        target_info.x_pixel = static_cast<float>( (obj.x_min + obj.x_max) / 2.0f );
+        target_info.y_pixel = static_cast<float>( (obj.y_min + obj.y_max) / 2.0f );
+        target_info.visible = true;
+        target_info.rid = obj.rid;
+        return true;
+    }
+};
+
+// OVD 专门化暂未实现，原占位已移除。
+
+} // namespace tracker_detail
+template <typename TObject, typename TMotracker>
+class tracker
+{
+    using binding = tracker_detail::TrackerBinding<TObject, TMotracker>;
+
+public:
+    using object_type = TObject;
+    using motracker_type = TMotracker;
+    using result_type = typename binding::result_type;
+
+    template <typename... Args>
+    explicit tracker(Args &&...args)
+        : m_tracker_impl(std::forward<Args>(args)...)
+    {
+    }
+
+    tracker(const tracker &) = delete;
+    tracker &operator=(const tracker &) = delete;
+
+    tracker(tracker &&) = default;
+    tracker &operator=(tracker &&) = default;
+
+    ~tracker() = default;
+
+    void process(const std::vector<TObject> &detections,
+                 bool compensation = false,
+                 int delta_x = 0,
+                 int delta_y = 0)
+    {
+        binding::process(m_tracker_impl, detections, compensation, delta_x, delta_y);
+    }
+
+    void reset()
+    {
+        binding::reset(m_tracker_impl);
+    }
+
+    result_type collect_results()
+    {
+        result_type result{};
+        binding::collect_results(m_tracker_impl, result);
+        return result;
+    }
+
+    void collect_results(result_type &out)
+    {
+        binding::collect_results(m_tracker_impl, out);
+    }
+
+    bool get_specific_type(result_type &out, result_type &specific_result, int32_t type)
+    {
+        return binding::get_specific_type(out, specific_result, type);
+    }
+
+    bool get_specific_rid(const result_type &out, TargetInfo &target_info)
+    {
+        return binding::get_specific_rid(out, target_info);
+    }
+
+    bool get_closest(result_type &out, TargetInfo &target_info, uint16_t v_w_center, uint16_t v_h_center)
+    {
+        return binding::get_closest(out, target_info, v_w_center, v_h_center);
+    }
+
+    TMotracker &native_tracker()
+    {
+        return m_tracker_impl;
+    }
+
+    const TMotracker &native_tracker() const
+    {
+        return m_tracker_impl;
+    }
+
+private:
+    TMotracker m_tracker_impl;
+};
+#endif // 0
+
+#endif // PRODUCT_MODULES_ENC_SRC_PID_TRACK_TRACKER_H_
